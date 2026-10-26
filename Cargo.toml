@@ -1,6 +1,6 @@
 [package]
 name = "alertmanager-ntfy-adapter"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-performance webhook adapter bridging Prometheus Alertmanager alerts to ntfy push notifications"
 authors = ["nikmosi <i@nikmosi.ru>"]
