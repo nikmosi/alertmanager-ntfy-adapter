@@ -1,0 +1,107 @@
+name: Image
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  DEFAULT_DOCKER_REGISTRY: zot.xinfra.ru
+  IMAGE_NAME: alertmanager-ntfy-adapter
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: https://data.forgejo.org/actions/checkout@v6
+
+      - name: Verify Docker tooling
+        run: |
+          if ! docker version >/dev/null 2>&1; then
+            echo "::error::Docker is not available on this runner. Configure the Forgejo runner for Docker access before using image builds."
+            exit 1
+          fi
+          if ! docker buildx version >/dev/null 2>&1; then
+            echo "::error::Docker Buildx is not available on this runner."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        run: |
+          docker buildx create --name builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Compute image metadata
+        id: meta
+        env:
+          DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
+        run: |
+          output_file="${FORGEJO_OUTPUT:-${GITHUB_OUTPUT:-}}"
+          if [ -z "$output_file" ]; then
+            echo "::error::No step output file is available."
+            exit 1
+          fi
+
+          registry="${DOCKER_REGISTRY:-$DEFAULT_DOCKER_REGISTRY}"
+          image="${registry}/${IMAGE_NAME}"
+          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
+          sha="${FORGEJO_SHA:-${GITHUB_SHA:-$(git rev-parse HEAD)}}"
+          short_sha="$(printf '%s' "$sha" | cut -c1-12)"
+
+          {
+            echo "image=$image"
+            echo "cache_ref=${image}:buildcache"
+            echo "tags<<EOF"
+            echo "${image}:${ref_name}"
+            if [ "${ref_name#v}" != "$ref_name" ]; then
+              echo "${image}:${ref_name#v}"
+            fi
+            echo "${image}:latest"
+            echo "EOF"
+          } >> "$output_file"
+
+      - name: Login to registry
+        env:
+          DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
+          DOCKER_REGISTRY_USERNAME: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          DOCKER_REGISTRY_PASSWORD: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "${DOCKER_REGISTRY_USERNAME:-}" ] || [ -z "${DOCKER_REGISTRY_PASSWORD:-}" ]; then
+            echo "::error::DOCKER_REGISTRY_USERNAME and DOCKER_REGISTRY_PASSWORD secrets are required."
+            exit 1
+          fi
+          registry="${DOCKER_REGISTRY:-$DEFAULT_DOCKER_REGISTRY}"
+          printf '%s' "$DOCKER_REGISTRY_PASSWORD" | docker login "$registry" \
+            --username "$DOCKER_REGISTRY_USERNAME" \
+            --password-stdin
+
+      - name: Build and push
+        shell: bash
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          CACHE_REF: ${{ steps.meta.outputs.cache_ref }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            tag_args+=(--tag "$tag")
+          done < <(printf '%s\n' "$TAGS")
+
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "::error::No image tags were generated."
+            exit 1
+          fi
+
+          docker buildx build \
+            --push \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=min,compression=zstd" \
+            --label "org.opencontainers.image.source=${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-}}" \
+            --label "org.opencontainers.image.revision=${FORGEJO_SHA:-${GITHUB_SHA:-}}" \
+            "${tag_args[@]}" \
+            .

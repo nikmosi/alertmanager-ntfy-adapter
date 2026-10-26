@@ -1,0 +1,6 @@
+target/
+.git/
+.forgejo/
+tests/
+Dockerfile*
+.dockerignore
